@@ -1,0 +1,16 @@
+# Dependencies
+/node_modules
+
+# Production
+/dist
+
+# Credentials
+/auth_info_baileys
+
+# Uploads
+/uploads
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
