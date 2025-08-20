@@ -29,7 +29,8 @@ const upload = multer({
         if (file.mimetype === 'application/pdf') {
             cb(null, true);
         } else {
-            cb(new Error('Solo se permiten archivos PDF.'));
+            // Usar un error de Multer para un mejor manejo posterior
+            cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'pdf'));
         }
     }
 });
@@ -59,42 +60,43 @@ router.post('/send-text', async (req: Request, res: Response) => {
     try {
         await whatsappClient.sendTextMessage(to, message);
         res.status(200).json({ status: 'ok', message: 'Mensaje de texto enviado.' });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ status: 'error', message: 'Error al enviar el mensaje.', details: error });
+    } catch (error: any) {
+        console.error('Error en /send-text:', error.message);
+        if (error.message.includes('no existe en WhatsApp')) {
+            return res.status(404).json({ status: 'error', message: error.message });
+        }
+        res.status(500).json({ status: 'error', message: 'Error al enviar el mensaje.', details: error.message });
     }
 });
 
 router.post('/send-pdf', upload.single('pdf'), async (req: Request, res: Response) => {
     const { to, caption } = req.body;
+    const file = req.file;
 
-    if (!req.file) {
+    if (!file) {
         return res.status(400).json({ status: 'error', message: 'El archivo PDF es requerido.' });
-    }
-    if (!to) {
-        // Si falta el destinatario, eliminamos el archivo subido para no dejar basura
-        fs.unlinkSync(req.file.path);
-        return res.status(400).json({ status: 'error', message: 'El campo "to" es requerido.' });
-    }
-
-    if (!whatsappClient.isReady()) {
-        fs.unlinkSync(req.file.path);
-        return res.status(500).json({ status: 'error', message: 'El cliente de WhatsApp no está listo.' });
     }
 
     try {
-        const pdfPath = req.file.path;
-        await whatsappClient.sendPdfMessage(to, pdfPath, caption || '');
-        // Opcional: eliminar el archivo después de enviarlo
-        fs.unlinkSync(pdfPath);
-        res.status(200).json({ status: 'ok', message: 'Mensaje con PDF enviado.' });
-    } catch (error) {
-        console.error(error);
-        // Si hay un error, también eliminamos el archivo
-        if (req.file) {
-            fs.unlinkSync(req.file.path);
+        if (!to) {
+            return res.status(400).json({ status: 'error', message: 'El campo "to" es requerido.' });
         }
-        res.status(500).json({ status: 'error', message: 'Error al enviar el PDF.', details: error });
+        if (!whatsappClient.isReady()) {
+            return res.status(500).json({ status: 'error', message: 'El cliente de WhatsApp no está listo.' });
+        }
+
+        await whatsappClient.sendPdfMessage(to, file.path, caption || '');
+        res.status(200).json({ status: 'ok', message: 'Mensaje con PDF enviado.' });
+    } catch (error: any) {
+        console.error('Error en /send-pdf:', error.message);
+        if (error.message.includes('no existe en WhatsApp')) {
+            res.status(404).json({ status: 'error', message: error.message });
+        } else {
+            res.status(500).json({ status: 'error', message: 'Error al enviar el PDF.', details: error.message });
+        }
+    } finally {
+        // Aseguramos que el archivo se elimine siempre, tanto en éxito como en error.
+        fs.unlinkSync(file.path);
     }
 });
 

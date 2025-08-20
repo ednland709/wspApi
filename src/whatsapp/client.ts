@@ -1,82 +1,121 @@
-
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, WASocket, proto } from '@whiskeysockets/baileys';
+import makeWASocket, {
+    DisconnectReason,
+    useMultiFileAuthState,
+    WASocket,
+    proto,
+    fetchLatestBaileysVersion
+} from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import qrcode from 'qrcode-terminal';
 import * as path from 'path';
+import qrcode from 'qrcode-terminal';
+import pino from 'pino';
 
 class WhatsAppClient {
-    private socket: WASocket | undefined;
-    private isInitialized = false;
+    public sock: WASocket | null = null;
+    private connectionState: 'connecting' | 'open' | 'close' = 'close';
+    private reconnectAttempts = 0;
 
-    async initialize() {
-        if (this.isInitialized) {
+    constructor() {}
+
+    /**
+     * Inicia la conexión con WhatsApp.
+     * Debe ser llamado desde el archivo principal de tu aplicación.
+     */
+    public async connect() {
+        if (this.sock || this.connectionState === 'open' || this.connectionState === 'connecting') {
+            console.log('El cliente ya está conectado o conectándose.');
             return;
         }
 
-        const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+        this.connectionState = 'connecting';
+        const authDir = path.join(__dirname, '../../auth_info_baileys');
+        const { state, saveCreds } = await useMultiFileAuthState(authDir);
+        
+        // fetchLatestBaileysVersion asegura que estás usando la última versión de la API de WhatsApp Web
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+		console.log(`Usando la versión de WA v${version.join('.')}, ¿es la última?: ${isLatest}`);
 
-        this.socket = makeWASocket({
+        console.log('Iniciando WhatsApp Client...');
+        this.sock = makeWASocket({
+            version,
             auth: state,
             printQRInTerminal: true,
+            // Configura un logger para no llenar la consola de ruido
+            logger: pino({ level: 'silent' })
         });
 
-        this.socket.ev.on('connection.update', (update) => {
+        // Guardar credenciales cada vez que se actualizan
+        this.sock.ev.on('creds.update', saveCreds);
+
+        // Manejar actualizaciones de la conexión
+        this.sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
-                console.log('Escanea este código QR con tu teléfono:');
+                console.log('------------------------------------------------------');
+                console.log('¡Nuevo código QR! Por favor, escanéalo con tu teléfono:');
                 qrcode.generate(qr, { small: true });
             }
 
             if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log('Conexión cerrada debido a', lastDisconnect?.error, ', reconectando:', shouldReconnect);
-                if (shouldReconnect) {
-                    this.initialize();
+                this.connectionState = 'close';
+                const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                if (shouldReconnect && this.reconnectAttempts < 5) {
+                    this.reconnectAttempts++;
+                    const delay = Math.pow(2, this.reconnectAttempts) * 1000;
+                    console.log(`Conexión cerrada. Reintentando en ${delay / 1000} segundos... (Intento ${this.reconnectAttempts})`);
+                    setTimeout(() => this.connect(), delay);
+                } else {
+                    console.error('Conexión cerrada permanentemente.', lastDisconnect?.error);
+                    // Aquí podrías añadir lógica para notificar a un administrador.
                 }
             } else if (connection === 'open') {
-                console.log('¡Conexión con WhatsApp abierta!');
+                // Reseteamos los intentos al conectar exitosamente
+                this.reconnectAttempts = 0;
+                this.connectionState = 'open';
+                console.log('¡Conexión abierta y cliente listo!');
             }
         });
-
-        this.socket.ev.on('creds.update', saveCreds);
-        this.isInitialized = true;
     }
 
     public isReady(): boolean {
-        return this.socket?.user !== undefined;
+        return this.connectionState === 'open';
     }
 
-    private formatPhoneNumber(number: string): string {
-        if (number.endsWith('@s.whatsapp.net')) {
-            return number;
+    private formatJid(to: string): string {
+        if (to.endsWith('@s.whatsapp.net')) {
+            return to;
         }
+        const number = to.replace(/\D/g, '');
         return `${number}@s.whatsapp.net`;
     }
 
-    async sendTextMessage(to: string, message: string) {
-        if (!this.isReady() || !this.socket) {
-            throw new Error('WhatsApp client no está listo.');
-        }
-        const jid = this.formatPhoneNumber(to);
-        await this.socket.sendMessage(jid, { text: message });
+    public async sendTextMessage(to: string, message: string): Promise<proto.WebMessageInfo | undefined> {
+        if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
+        
+        const jid = this.formatJid(to);
+        const [result] = await this.sock.onWhatsApp(jid);
+        if (!result?.exists) throw new Error(`El número ${to} no existe en WhatsApp.`);
+        
+        return this.sock.sendMessage(jid, { text: message });
     }
 
-    async sendPdfMessage(to: string, pdfPath: string, caption: string = '') {
-        if (!this.isReady() || !this.socket) {
-            throw new Error('WhatsApp client no está listo.');
-        }
-        const jid = this.formatPhoneNumber(to);
-        const messageContent = {
+    public async sendPdfMessage(to: string, pdfPath: string, caption: string): Promise<proto.WebMessageInfo | undefined> {
+        if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
+
+        const jid = this.formatJid(to);
+        const [result] = await this.sock.onWhatsApp(jid);
+        if (!result?.exists) throw new Error(`El número ${to} no existe en WhatsApp.`);
+
+        return this.sock.sendMessage(jid, {
             document: { url: pdfPath },
             mimetype: 'application/pdf',
             fileName: path.basename(pdfPath),
-            caption: caption,
-        };
-
-        await this.socket.sendMessage(jid, messageContent);
+            caption: caption
+        });
     }
 }
 
-// Exportamos una única instancia (Singleton)
 export const whatsappClient = new WhatsAppClient();
