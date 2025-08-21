@@ -96,7 +96,11 @@ router.post('/send-pdf', upload.single('pdf'), async (req: Request, res: Respons
         }
     } finally {
         // Aseguramos que el archivo se elimine siempre, tanto en éxito como en error.
-        fs.unlinkSync(file.path);
+        if (file) {
+            fs.unlink(file.path, (err) => {
+                if (err) console.error(`Error al eliminar el archivo temporal: ${file.path}`, err);
+            });
+        }
     }
 });
 

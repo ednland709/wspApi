@@ -92,24 +92,23 @@ class WhatsAppClient {
         return `${number}@s.whatsapp.net`;
     }
 
-    public async sendTextMessage(to: string, message: string): Promise<proto.WebMessageInfo | undefined> {
+    private async prepareMessage(to: string): Promise<string> {
         if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
         
         const jid = this.formatJid(to);
-        const [result] = await this.sock.onWhatsApp(jid);
+        const [result] = (await this.sock.onWhatsApp(jid)) || [];
         if (!result?.exists) throw new Error(`El número ${to} no existe en WhatsApp.`);
-        
-        return this.sock.sendMessage(jid, { text: message });
+        return jid;
+    }
+
+    public async sendTextMessage(to: string, message: string): Promise<proto.WebMessageInfo | undefined> {
+        const jid = await this.prepareMessage(to);
+        return this.sock!.sendMessage(jid, { text: message });
     }
 
     public async sendPdfMessage(to: string, pdfPath: string, caption: string): Promise<proto.WebMessageInfo | undefined> {
-        if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
-
-        const jid = this.formatJid(to);
-        const [result] = await this.sock.onWhatsApp(jid);
-        if (!result?.exists) throw new Error(`El número ${to} no existe en WhatsApp.`);
-
-        return this.sock.sendMessage(jid, {
+        const jid = await this.prepareMessage(to);
+        return this.sock!.sendMessage(jid, {
             document: { url: pdfPath },
             mimetype: 'application/pdf',
             fileName: path.basename(pdfPath),
