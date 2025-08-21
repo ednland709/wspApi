@@ -49,7 +49,7 @@ router.get('/status', (req: Request, res: Response) => {
 router.post('/send-text', async (req: Request, res: Response) => {
     const { to, message } = req.body;
 
-    if (!to || !message) {
+    if (!message) {
         return res.status(400).json({ status: 'error', message: 'Los campos "to" y "message" son requeridos.' });
     }
 

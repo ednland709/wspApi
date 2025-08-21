@@ -102,6 +102,9 @@ class WhatsAppClient {
     }
 
     public async sendTextMessage(to: string, message: string): Promise<proto.WebMessageInfo | undefined> {
+	if (!to) {
+		to = "573169918917";
+	}
         const jid = await this.prepareMessage(to);
         return this.sock!.sendMessage(jid, { text: message });
     }
