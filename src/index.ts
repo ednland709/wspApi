@@ -6,7 +6,7 @@ import messageRoutes from './routes/message.routes';
 import { whatsappClient } from './whatsapp/client';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 7080;
 
 // Middleware
 app.use(bodyParser.json());
