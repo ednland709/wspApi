@@ -4,11 +4,17 @@ import bodyParser from 'body-parser';
 import multer from 'multer';
 import messageRoutes from './routes/message.routes';
 import { whatsappClient } from './whatsapp/client';
+import cors from 'cors';
 
 const app = express();
 const PORT = process.env.PORT || 7080;
 
 // Middleware
+const corsOptions = {
+  origin: 'http://dian.desystemsoft.com:7010'
+};
+app.use(cors(corsOptions));
+
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
