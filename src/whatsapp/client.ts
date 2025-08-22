@@ -100,7 +100,7 @@ class WhatsAppClient extends EventEmitter {
         return this.connectionState === 'open';
     }
 
-    public async disconnect() {
+    public async disconnect(shouldDeleteFiles: boolean = false) {
         console.log(`[${this.sessionId}] Desconectando cliente...`);
         if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
         try {
@@ -108,9 +108,25 @@ class WhatsAppClient extends EventEmitter {
         } catch (error) {
             console.warn(`[${this.sessionId}] Error al hacer logout (posiblemente ya desconectado):`, error);
         }
-        await fs.remove(this.sessionPath); // Eliminar la carpeta de sesión
+        if (shouldDeleteFiles) {
+            console.log(`[${this.sessionId}] Eliminando archivos de sesión...`);
+            await fs.remove(this.sessionPath);
+        }
         this.connectionState = 'close';
         this.emit('disconnected');
+    }
+
+    // Método para desconexión suave (sin eliminar archivos)
+    public async softDisconnect() {
+        console.log(`[${this.sessionId}] Desconexión suave (manteniendo archivos)...`);
+        if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
+        try {
+            await this.sock?.logout();
+        } catch (error) {
+            console.warn(`[${this.sessionId}] Error al hacer logout en desconexión suave (posiblemente ya desconectado):`, error);
+        }
+        this.connectionState = 'close';
+        this.emit('disconnected'); // Todavía emitimos disconnected para que el manager lo elimine de su mapa
     }
 
     private resetTimeout() {
@@ -163,8 +179,8 @@ class WhatsAppClientManager {
         console.log(`[Manager] Creando nueva sesión para ${sessionId}`);
         const client = new WhatsAppClient(sessionId);
 
-        client.on('timeout', () => this.deleteSession(sessionId));
-        client.on('disconnected', () => this.deleteSession(sessionId));
+        client.on('timeout', () => this.deleteSession(sessionId, false)); // No eliminar archivos en timeout
+        client.on('disconnected', () => this.deleteSession(sessionId, true)); // Eliminar archivos en desconexión permanente
 
         this.sessions.set(sessionId, client);
         return client;
@@ -174,11 +190,11 @@ class WhatsAppClientManager {
         return this.sessions.get(sessionId);
     }
 
-    async deleteSession(sessionId: string): Promise<void> {
+    async deleteSession(sessionId: string, shouldDeleteFiles: boolean = false): Promise<void> {
         const session = this.sessions.get(sessionId);
         if (session) {
-            console.log(`[Manager] Eliminando sesión para ${sessionId}`);
-            await session.disconnect();
+            console.log(`[Manager] Eliminando sesión para ${sessionId} (eliminar archivos: ${shouldDeleteFiles})`);
+            await session.disconnect(shouldDeleteFiles);
             this.sessions.delete(sessionId);
         }
     }

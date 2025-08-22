@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import { whatsappClientManager } from '../whatsapp/client';
 import { body, param } from 'express-validator';
 import { validateRequest } from '../middlewares/validator';
+import * as fs from 'fs-extra'; // Importar fs-extra
+import * as path from 'path'; // Importar path
 
 const router = Router();
 
@@ -84,7 +86,7 @@ router.delete(
             return res.status(400).json({ status: 'error', message: 'sessionId debe ser un string.' });
         }
         try {
-            await whatsappClientManager.deleteSession(sessionId);
+            await whatsappClientManager.deleteSession(sessionId, true); // Eliminar archivos al cerrar sesión por API
             res.status(200).json({ status: 'ok', message: `Sesión ${sessionId} cerrada.` });
         } catch (error: any) {
             console.error(`Error en /logout para ${sessionId}:`, error);
@@ -98,18 +100,46 @@ router.get(
     '/:sessionId',
     [param('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.')],
     validateRequest,
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
         const { sessionId } = req.params;
         if (typeof sessionId !== 'string') {
             return res.status(400).json({ status: 'error', message: 'sessionId debe ser un string.' });
         }
-        const session = whatsappClientManager.getSession(sessionId);
+
+        let session = whatsappClientManager.getSession(sessionId);
 
         if (!session) {
-            return res.status(200).json({ status: 'nd' });
+            // Si no está en memoria, verificar si existe en disco
+            const sessionPath = path.join(__dirname, '../../auth_info_baileys', sessionId);
+            const sessionExistsOnDisk = await fs.pathExists(sessionPath);
+
+            if (!sessionExistsOnDisk) {
+                return res.status(200).json({ status: 'nd' });
+            }
+
+            // Si existe en disco, intentar cargarla y validarla
+            session = whatsappClientManager.createSession(sessionId); // Crea una nueva instancia de WhatsAppClient
+            
+            try {
+                // Intentar conectar y esperar a que esté lista o falle
+                const connectionPromise = new Promise<void>((resolve, reject) => {
+                    session!.once('ready', () => resolve());
+                    session!.once('disconnected', () => reject(new Error('Sesión desconectada durante la validación.')));
+                    setTimeout(() => reject(new Error('Timeout al validar sesión desde disco.')), 60000); // 60s timeout
+                });
+
+                await session.connect(); // Iniciar la conexión
+                await connectionPromise; // Esperar a que la conexión se establezca o falle
+
+            } catch (error: any) {
+                console.error(`[${sessionId}] Error al validar sesión desde disco:`, error.message);
+                // Si falla la conexión, eliminar la sesión inválida del disco
+                await whatsappClientManager.deleteSession(sessionId, true); // Eliminar archivos
+                return res.status(200).json({ status: 'nd', message: 'Sesión inválida o caducada, eliminada.' });
+            }
         }
 
-        const isReady = session.isReady();
+        const isReady = session?.isReady();
         let phoneNumber: string | undefined;
 
         if (isReady && session?.sock?.user?.id) {
