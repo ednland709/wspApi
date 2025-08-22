@@ -14,11 +14,9 @@ const PORT = process.env.PORT || 7080; // El puerto 7080 seguirá siendo el puer
 
 // Orígenes permitidos para CORS
 const allowedOrigins = [
-    'http://dian.desystemsoft.com:7010',
+    'https://www.desystemsoft.com',
     'http://localhost:4200',
-    'http://app2.desystemsoft.com',
     'https://app2.desystemsoft.com',
-    'http://dian.desystemsoft.com',
     'https://dian.desystemsoft.com'
 ];
 
@@ -101,9 +99,6 @@ io.on('connection', (socket) => {
 async function start() {
     httpsServer.listen(PORT, () => { // Ahora solo escucha en el puerto definido por PORT (o 7080)
         console.log(`Servidor HTTPS escuchando en el puerto ${PORT}`);
-        console.log(`API de Sesiones disponible en https://localhost:${PORT}/api/sessions`);
-        console.log(`API de Mensajes disponible en https://localhost:${PORT}/api/messages`);
-        console.log(`Servidor WebSocket disponible en wss://localhost:${PORT}`);
     });
 }
 

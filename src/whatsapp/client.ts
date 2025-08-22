@@ -182,10 +182,6 @@ class WhatsAppClientManager {
             this.sessions.delete(sessionId);
         }
     }
-
-    listSessions(): string[] {
-        return Array.from(this.sessions.keys());
-    }
 }
 
 export const whatsappClientManager = new WhatsAppClientManager();

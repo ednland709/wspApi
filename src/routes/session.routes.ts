@@ -7,11 +7,11 @@ const router = Router();
 
 // Iniciar una nueva sesión y obtener el QR
 router.post(
-    '/:sessionId/start',
-    [param('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.')],
+    '/',
+    [body('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.')],
     validateRequest,
     async (req: Request, res: Response) => {
-        const { sessionId } = req.params;
+        const { sessionId } = req.body; // Ahora se obtiene del body
 
         if (typeof sessionId !== 'string') {
             return res.status(400).json({ status: 'error', message: 'sessionId debe ser un string.' });
@@ -75,7 +75,7 @@ router.post(
 
 // Cerrar una sesión
 router.delete(
-    '/:sessionId/logout',
+    '/:sessionId',
     [param('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.')],
     validateRequest,
     async (req: Request, res: Response) => {
@@ -93,9 +93,9 @@ router.delete(
     }
 );
 
-// Obtener el estado de una sesión específica
+// Obtener el estado detallado de una sesión (consolidado)
 router.get(
-    '/:sessionId/status',
+    '/:sessionId',
     [param('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.')],
     validateRequest,
     (req: Request, res: Response) => {
@@ -106,47 +106,23 @@ router.get(
         const session = whatsappClientManager.getSession(sessionId);
 
         if (!session) {
-            return res.status(404).json({ status: 'error', message: 'Sesión no encontrada.' });
+            return res.status(200).json({ status: 'nd' });
         }
 
         const isReady = session.isReady();
-        res.status(200).json({
-            status: 'ok',
-            sessionId,
-            isReady,
-            connectionState: session.connectionState,
-            message: isReady ? 'Cliente de WhatsApp listo.' : 'Cliente de WhatsApp no está listo.'
-        });
-    }
-);
-
-// Verificar si una sesión está activa
-router.get(
-    '/:sessionId/is-active',
-    [param('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.')],
-    validateRequest,
-    (req: Request, res: Response) => {
-        const { sessionId } = req.params;
-        if (typeof sessionId !== 'string') {
-            return res.status(400).json({ status: 'error', message: 'sessionId debe ser un string.' });
-        }
-        const session = whatsappClientManager.getSession(sessionId);
-
-        const isActive = session ? session.isReady() : false;
         let phoneNumber: string | undefined;
 
-        if (isActive && session?.sock?.user?.id) {
-            // El JID de Baileys es típicamente 'XXXXXXXXXXX:YY@s.whatsapp.net'
-            // Necesitamos extraer solo el número
+        if (isReady && session?.sock?.user?.id) {
             phoneNumber = session.sock.user.id.split(':')[0];
         }
 
         res.status(200).json({
             status: 'ok',
             sessionId,
-            isActive,
-            phoneNumber: phoneNumber, // Añadir el número de teléfono
-            message: isActive ? 'Sesión activa.' : 'Sesión inactiva o no encontrada.'
+            isReady,
+            connectionState: session.connectionState,
+            phoneNumber: phoneNumber,
+            message: isReady ? 'Cliente de WhatsApp listo.' : 'Cliente de WhatsApp no está listo.'
         });
     }
 );
