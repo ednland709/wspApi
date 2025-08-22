@@ -7,87 +7,122 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import * as path from 'path';
-import qrcode from 'qrcode-terminal';
+import * as fs from 'fs-extra';
 import pino from 'pino';
+import { EventEmitter } from 'events';
 
-class WhatsAppClient {
+import { io } from '../index'; // Importar la instancia de socket.io
+
+const SESSIONS_DIR = path.join(__dirname, '../../auth_info_baileys');
+const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
+
+// Asegurarse de que el directorio de sesiones exista
+fs.ensureDirSync(SESSIONS_DIR);
+
+class WhatsAppClient extends EventEmitter {
     public sock: WASocket | null = null;
-    private connectionState: 'connecting' | 'open' | 'close' = 'close';
-    private reconnectAttempts = 0;
+    public connectionState: 'connecting' | 'open' | 'close' = 'close';
+    public qr: string | null = null;
+    private sessionTimeout: NodeJS.Timeout | null = null;
+    private reconnectAttempts = 0; // Añadir esta línea
+    private readonly sessionPath: string;
 
-    constructor() {}
+    constructor(public readonly sessionId: string) {
+        super();
+        this.sessionPath = path.join(SESSIONS_DIR, sessionId);
+        this.resetTimeout();
+    }
 
-    /**
-     * Inicia la conexión con WhatsApp.
-     * Debe ser llamado desde el archivo principal de tu aplicación.
-     */
     public async connect() {
         if (this.sock || this.connectionState === 'open' || this.connectionState === 'connecting') {
-            console.log('El cliente ya está conectado o conectándose.');
+            console.log(`[${this.sessionId}] El cliente ya está conectado o conectándose.`);
             return;
         }
 
         this.connectionState = 'connecting';
-        const authDir = path.join(__dirname, '../../auth_info_baileys');
-        const { state, saveCreds } = await useMultiFileAuthState(authDir);
+        await fs.ensureDir(this.sessionPath);
+        const { state, saveCreds } = await useMultiFileAuthState(this.sessionPath);
         
-        // fetchLatestBaileysVersion asegura que estás usando la última versión de la API de WhatsApp Web
         const { version, isLatest } = await fetchLatestBaileysVersion();
-		console.log(`Usando la versión de WA v${version.join('.')}, ¿es la última?: ${isLatest}`);
+        console.log(`[${this.sessionId}] Usando la versión de WA v${version.join('.')}, ¿es la última?: ${isLatest}`);
 
-        console.log('Iniciando WhatsApp Client...');
         this.sock = makeWASocket({
             version,
             auth: state,
-            printQRInTerminal: true,
-            // Configura un logger para no llenar la consola de ruido
-            logger: pino({ level: 'silent' })
+            printQRInTerminal: false, // Lo manejaremos nosotros para emitirlo
+            logger: pino({ level: 'info' }) // Cambiado a 'info' para depuración
         });
 
-        // Guardar credenciales cada vez que se actualizan
         this.sock.ev.on('creds.update', saveCreds);
 
-        // Manejar actualizaciones de la conexión
         this.sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
-                console.log('------------------------------------------------------');
-                console.log('¡Nuevo código QR! Por favor, escanéalo con tu teléfono:');
-                qrcode.generate(qr, { small: true });
+                this.qr = qr;
+                this.emit('qr', qr); // Emitir evento con el QR
             }
 
             if (connection === 'close') {
                 this.connectionState = 'close';
+                this.sock = null; // Asegurarse de que el socket se nulifique al cerrar la conexión
                 const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-                if (shouldReconnect && this.reconnectAttempts < 5) {
-                    this.reconnectAttempts++;
-                    const delay = Math.pow(2, this.reconnectAttempts) * 1000;
-                    console.log(`Conexión cerrada. Reintentando en ${delay / 1000} segundos... (Intento ${this.reconnectAttempts})`);
-                    setTimeout(() => this.connect(), delay);
+                
+                if (statusCode === DisconnectReason.loggedOut) {
+                    console.log(`[${this.sessionId}] Conexión cerrada permanentemente (logged out).`);
+                    this.emit('disconnected');
                 } else {
-                    console.error('Conexión cerrada permanentemente.', lastDisconnect?.error);
-                    // Aquí podrías añadir lógica para notificar a un administrador.
+                    console.log(`[${this.sessionId}] Conexión cerrada, intentando reconectar...`);
+                    if (this.reconnectAttempts < 5) { // Limitar intentos de reconexión
+                        this.reconnectAttempts++;
+                        const delay = Math.pow(2, this.reconnectAttempts) * 1000; // Backoff exponencial
+                        console.log(`[${this.sessionId}] Reintentando en ${delay / 1000} segundos... (Intento ${this.reconnectAttempts})`);
+                        setTimeout(() => this.connect(), delay);
+                    } else {
+                        console.error(`[${this.sessionId}] Máximo de intentos de reconexión alcanzado. Sesión cerrada.`);
+                        this.emit('disconnected'); // Emitir desconexión permanente
+                    }
                 }
             } else if (connection === 'open') {
-                // Reseteamos los intentos al conectar exitosamente
-                this.reconnectAttempts = 0;
+                this.reconnectAttempts = 0; // Resetear intentos al conectar exitosamente
                 this.connectionState = 'open';
-                console.log('¡Conexión abierta y cliente listo!');
+                this.qr = null;
+                console.log(`[${this.sessionId}] Conexión abierta y cliente listo!`);
+                this.emit('ready');
+                io.to(this.sessionId).emit('session-ready', { sessionId: this.sessionId }); // Emitir evento WebSocket
             }
         });
+        this.resetTimeout();
     }
 
     public isReady(): boolean {
+        this.resetTimeout();
         return this.connectionState === 'open';
     }
 
-    private formatJid(to: string): string {
-        if (to.endsWith('@s.whatsapp.net')) {
-            return to;
+    public async disconnect() {
+        console.log(`[${this.sessionId}] Desconectando cliente...`);
+        if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
+        try {
+            await this.sock?.logout();
+        } catch (error) {
+            console.warn(`[${this.sessionId}] Error al hacer logout (posiblemente ya desconectado):`, error);
         }
+        await fs.remove(this.sessionPath); // Eliminar la carpeta de sesión
+        this.connectionState = 'close';
+        this.emit('disconnected');
+    }
+
+    private resetTimeout() {
+        if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
+        this.sessionTimeout = setTimeout(() => {
+            console.log(`[${this.sessionId}] Sesión inactiva, desconectando...`);
+            this.emit('timeout');
+        }, SESSION_TIMEOUT_MS);
+    }
+
+    private formatJid(to: string): string {
+        if (to.endsWith('@s.whatsapp.net')) return to;
         const number = to.replace(/\D/g, '');
         return `${number}@s.whatsapp.net`;
     }
@@ -102,9 +137,6 @@ class WhatsAppClient {
     }
 
     public async sendTextMessage(to: string, message: string): Promise<proto.WebMessageInfo | undefined> {
-	if (!to) {
-		to = "573169918917";
-	}
         const jid = await this.prepareMessage(to);
         return this.sock!.sendMessage(jid, { text: message });
     }
@@ -120,4 +152,40 @@ class WhatsAppClient {
     }
 }
 
-export const whatsappClient = new WhatsAppClient();
+class WhatsAppClientManager {
+    private sessions = new Map<string, WhatsAppClient>();
+
+    createSession(sessionId: string): WhatsAppClient {
+        if (this.sessions.has(sessionId)) {
+            return this.getSession(sessionId)!;
+        }
+
+        console.log(`[Manager] Creando nueva sesión para ${sessionId}`);
+        const client = new WhatsAppClient(sessionId);
+
+        client.on('timeout', () => this.deleteSession(sessionId));
+        client.on('disconnected', () => this.deleteSession(sessionId));
+
+        this.sessions.set(sessionId, client);
+        return client;
+    }
+
+    getSession(sessionId: string): WhatsAppClient | undefined {
+        return this.sessions.get(sessionId);
+    }
+
+    async deleteSession(sessionId: string): Promise<void> {
+        const session = this.sessions.get(sessionId);
+        if (session) {
+            console.log(`[Manager] Eliminando sesión para ${sessionId}`);
+            await session.disconnect();
+            this.sessions.delete(sessionId);
+        }
+    }
+
+    listSessions(): string[] {
+        return Array.from(this.sessions.keys());
+    }
+}
+
+export const whatsappClientManager = new WhatsAppClientManager();
