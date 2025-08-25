@@ -100,17 +100,13 @@ class WhatsAppClient extends EventEmitter {
         return this.connectionState === 'open';
     }
 
-    public async disconnect(shouldDeleteFiles: boolean = false) {
+    public async disconnect() {
         console.log(`[${this.sessionId}] Desconectando cliente...`);
         if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
         try {
             await this.sock?.logout();
         } catch (error) {
             console.warn(`[${this.sessionId}] Error al hacer logout (posiblemente ya desconectado):`, error);
-        }
-        if (shouldDeleteFiles) {
-            console.log(`[${this.sessionId}] Eliminando archivos de sesión...`);
-            await fs.remove(this.sessionPath);
         }
         this.connectionState = 'close';
         this.emit('disconnected');
@@ -194,8 +190,10 @@ class WhatsAppClientManager {
         const session = this.sessions.get(sessionId);
         if (session) {
             console.log(`[Manager] Eliminando sesión para ${sessionId} (eliminar archivos: ${shouldDeleteFiles})`);
-            await session.disconnect(shouldDeleteFiles);
+            await session.disconnect();
             this.sessions.delete(sessionId);
+            const sessionPath = path.join(SESSIONS_DIR, sessionId);
+            await fs.remove(sessionPath);
         }
     }
 }
