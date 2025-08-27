@@ -76,14 +76,15 @@ router.post('/send-pdf',
         if (!file) {
             return res.status(400).json({ status: 'error', message: 'El archivo PDF es requerido.' });
         }
+        console.log('Obteniendo sesio para:' + sessionId)
         const session = await whatsappClientManager.getSession(sessionId);
         if (!session || !session.isReady()) {
-            // Si la sesión no existe, eliminamos el archivo subido para no dejar basura
             fs.unlink(file.path);
             return res.status(204).json({ });
         }
 
         try {
+            console.log('Sending menssage.')
             await session.sendPdfMessage(to, file.path, caption || '');
             res.status(200).json({ status: 'ok', message: 'Mensaje con PDF enviado.' });
         } catch (error: any) {
@@ -103,13 +104,13 @@ router.post('/send-pdf',
 
 router.post('/send-contact', 
     [
+        body('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.'),
+        body('to').isString().notEmpty().withMessage('El destinatario (to) es requerido.'),
         body('message').isString().notEmpty().withMessage('El mensaje (message) es requerido.')
     ],
     validateRequest,
     async (req: Request, res: Response) => {
-        const { message } = req.body;
-        const sessionId = '6488c749276ed745000a9062';
-        const to = '573169918917' 
+        const { sessionId, to, message } = req.body; 
         const session = await whatsappClientManager.getSession(sessionId);
 
         if (!session || !session.isReady()) {

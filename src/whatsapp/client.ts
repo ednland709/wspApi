@@ -100,24 +100,11 @@ class WhatsAppClient extends EventEmitter {
     }
 
     public async disconnect() {
-        console.log(`[${this.sessionId}] Desconectando cliente...`);
+        console.log(`[${this.sessionId}] Desconectando cliente (desconexión suave)...`);
         if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
-        try {
-            await this.sock?.logout();
-        } catch (error) {
-            console.warn(`[${this.sessionId}] Error al hacer logout (posiblemente ya desconectado):`, error);
-        }
-        this.connectionState = 'close';
-    }
-
-    // Método para desconexión suave (sin eliminar archivos)
-    public async softDisconnect() {
-        console.log(`[${this.sessionId}] Desconexión suave (manteniendo archivos)...`);
-        if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
-        try {
-            await this.sock?.logout();
-        } catch (error) {
-            console.warn(`[${this.sessionId}] Error al hacer logout en desconexión suave (posiblemente ya desconectado):`, error);
+        if (this.sock) {
+            await this.sock.ws.close();
+            this.sock = null;
         }
         this.connectionState = 'close';
     }
@@ -178,8 +165,8 @@ class WhatsAppClientManager {
         });
 
         client.on('disconnected', () => {
-            console.log(`[Manager] Sesión ${sessionId} desconectada, eliminada del mapa.`);
-            this.sessions.delete(sessionId);
+            console.log(`[Manager] Sesión ${sessionId} desconectada, eliminando...`);
+            this.deleteSession(sessionId);
         });
 
         this.sessions.set(sessionId, client);
@@ -202,30 +189,28 @@ class WhatsAppClientManager {
             
             console.log(`[Manager] Intentando restaurar sesión ${sessionId} desde el disco...`);
             try {
-                const connectionPromise = new Promise<void>((resolve, reject) => {
-                    session!.once('ready', resolve);
-                    session!.once('disconnected', () => reject(new Error('La sesión se desconectó durante la restauración.')));
-                    setTimeout(() => reject(new Error('Timeout al restaurar la sesión desde el disco.')), 60000);
-                });
-
                 await session.connect();
-                await connectionPromise;
                 return session;
             } catch (error: any) {
                 console.error(`[${sessionId}] Error al restaurar sesión desde disco:`, error.message);
-                await this.deleteSession(sessionId); // Limpiar sesión fallida
                 return undefined;
             }
         }
-        return session; // Devuelve la sesión si está en memoria pero no lista, o undefined si no existe
+        return session;
     }
 
     async deleteSession(sessionId: string): Promise<void> {
         const session = this.sessions.get(sessionId);
         if (session) {
             console.log(`[Manager] Eliminando sesión para ${sessionId}`);
-            await session.disconnect();
+            await session.disconnect(); // Disconnect before deleting files
             this.sessions.delete(sessionId);
+        }
+
+        const sessionPath = path.join(SESSIONS_DIR, sessionId);
+        if (await fs.pathExists(sessionPath)) {
+            console.log(`[Manager] Eliminando archivos de sesión para ${sessionId}`);
+            await fs.remove(sessionPath);
         }
     }
 }

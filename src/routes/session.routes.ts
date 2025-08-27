@@ -87,7 +87,6 @@ router.delete(
         }
         try {
             await whatsappClientManager.deleteSession(sessionId);
-            await fs.remove(path.join(SESSIONS_DIR, sessionId));
             res.status(200).json({ status: 'ok', message: `Sesión ${sessionId} cerrada.` });
         } catch (error: any) {
             console.error(`Error en /logout para ${sessionId}:`, error);
