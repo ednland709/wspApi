@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import * as fs from 'fs-extra';
 import * as path from 'path';
-import { whatsappClientManager } from '../whatsapp/client';
+import { whatsappClientManager, WhatsAppClient } from '../whatsapp/client';
 import { body } from 'express-validator';
 import { validateRequest } from '../middlewares/validator';
 
@@ -32,6 +32,35 @@ const upload = multer({
     }
 });
 
+const waitForSessionReady = (session: WhatsAppClient, timeout = 30000): Promise<void> => {
+    return new Promise((resolve, reject) => {
+        if (session.isReady()) {
+            return resolve();
+        }
+
+        const onReady = () => {
+            clearTimeout(timer);
+            session.removeListener('disconnected', onDisconnect);
+            resolve();
+        };
+
+        const onDisconnect = () => {
+            clearTimeout(timer);
+            session.removeListener('ready', onReady);
+            reject(new Error('La sesión se desconectó durante la espera.'));
+        };
+
+        const timer = setTimeout(() => {
+            session.removeListener('ready', onReady);
+            session.removeListener('disconnected', onDisconnect);
+            reject(new Error('Timeout esperando que la sesión esté lista.'));
+        }, timeout);
+
+        session.once('ready', onReady);
+        session.once('disconnected', onDisconnect);
+    });
+};
+
 // --- Rutas de la API ---
 
 router.post('/send-text', 
@@ -43,13 +72,15 @@ router.post('/send-text',
     validateRequest,
     async (req: Request, res: Response) => {
         const { sessionId, to, message } = req.body;
-        const session = await whatsappClientManager.getSession(sessionId);
-
-        if (!session || !session.isReady()) {
-            return res.status(404).json({ status: 'error', message: 'La sesión no está lista o no existe.' });
-        }
-
         try {
+            const session = await whatsappClientManager.getSession(sessionId);
+
+            if (!session) {
+                return res.status(404).json({ status: 'error', message: 'La sesión no existe.' });
+            }
+
+            await waitForSessionReady(session);
+
             await session.sendTextMessage(to, message);
             res.status(200).json({ status: 'ok', message: 'Mensaje de texto enviado.' });
         } catch (error: any) {
@@ -76,15 +107,17 @@ router.post('/send-pdf',
         if (!file) {
             return res.status(400).json({ status: 'error', message: 'El archivo PDF es requerido.' });
         }
-        console.log('Obteniendo sesio para:' + sessionId)
-        const session = await whatsappClientManager.getSession(sessionId);
-        if (!session || !session.isReady()) {
-            fs.unlink(file.path);
-            return res.status(204).json({ });
-        }
 
         try {
-            console.log('Sending menssage.')
+            const session = await whatsappClientManager.getSession(sessionId);
+
+            if (!session) {
+                fs.unlink(file.path);
+                return res.status(404).json({ status: 'error', message: 'La sesión no existe.' });
+            }
+
+            await waitForSessionReady(session);
+
             await session.sendPdfMessage(to, file.path, caption || '');
             res.status(200).json({ status: 'ok', message: 'Mensaje con PDF enviado.' });
         } catch (error: any) {
@@ -111,13 +144,15 @@ router.post('/send-contact',
     validateRequest,
     async (req: Request, res: Response) => {
         const { sessionId, to, message } = req.body; 
-        const session = await whatsappClientManager.getSession(sessionId);
-
-        if (!session || !session.isReady()) {
-            return res.status(404).json({ status: 'error', message: 'La sesión no está lista o no existe.' });
-        }
-
         try {
+            const session = await whatsappClientManager.getSession(sessionId);
+
+            if (!session) {
+                return res.status(404).json({ status: 'error', message: 'La sesión no existe.' });
+            }
+
+            await waitForSessionReady(session);
+
             await session.sendTextMessage(to, message);
             res.status(200).json({ status: 'ok', message: 'Mensaje de texto enviado.' });
         } catch (error: any) {

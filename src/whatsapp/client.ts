@@ -19,7 +19,7 @@ const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
 // Asegurarse de que el directorio de sesiones exista
 fs.ensureDirSync(SESSIONS_DIR);
 
-class WhatsAppClient extends EventEmitter {
+export class WhatsAppClient extends EventEmitter {
     public sock: WASocket | null = null;
     public connectionState: 'connecting' | 'open' | 'close' = 'close';
     public qr: string | null = null;
