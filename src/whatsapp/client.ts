@@ -26,6 +26,7 @@ class WhatsAppClient extends EventEmitter {
     private sessionTimeout: NodeJS.Timeout | null = null;
     private reconnectAttempts = 0; // Añadir esta línea
     private readonly sessionPath: string;
+    private isIntentionalDisconnect = false;
 
     constructor(public readonly sessionId: string) {
         super();
@@ -39,6 +40,7 @@ class WhatsAppClient extends EventEmitter {
             return;
         }
 
+        this.isIntentionalDisconnect = false;
         this.connectionState = 'connecting';
         await fs.ensureDir(this.sessionPath);
         const { state, saveCreds } = await useMultiFileAuthState(this.sessionPath);
@@ -70,7 +72,7 @@ class WhatsAppClient extends EventEmitter {
                 if (statusCode === DisconnectReason.loggedOut) {
                     console.log(`[${this.sessionId}] Conexión cerrada permanentemente (logged out).`);
                     this.emit('disconnected');
-                } else {
+                } else if (!this.isIntentionalDisconnect) {
                     console.log(`[${this.sessionId}] Conexión cerrada, intentando reconectar...`);
                     if (this.reconnectAttempts < 5) { // Limitar intentos de reconexión
                         this.reconnectAttempts++;
@@ -101,6 +103,7 @@ class WhatsAppClient extends EventEmitter {
 
     public async disconnect() {
         console.log(`[${this.sessionId}] Desconectando cliente (desconexión suave)...`);
+        this.isIntentionalDisconnect = true;
         if (this.sessionTimeout) clearTimeout(this.sessionTimeout);
         if (this.sock) {
             await this.sock.ws.close();
