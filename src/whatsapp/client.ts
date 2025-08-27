@@ -49,7 +49,6 @@ class WhatsAppClient extends EventEmitter {
         this.sock = makeWASocket({
             version,
             auth: state,
-            printQRInTerminal: false, // Lo manejaremos nosotros para emitirlo
             logger: pino({ level: 'info' }) // Cambiado a 'info' para depuración
         });
 
@@ -109,7 +108,6 @@ class WhatsAppClient extends EventEmitter {
             console.warn(`[${this.sessionId}] Error al hacer logout (posiblemente ya desconectado):`, error);
         }
         this.connectionState = 'close';
-        this.emit('disconnected');
     }
 
     // Método para desconexión suave (sin eliminar archivos)
@@ -122,7 +120,6 @@ class WhatsAppClient extends EventEmitter {
             console.warn(`[${this.sessionId}] Error al hacer logout en desconexión suave (posiblemente ya desconectado):`, error);
         }
         this.connectionState = 'close';
-        this.emit('disconnected'); // Todavía emitimos disconnected para que el manager lo elimine de su mapa
     }
 
     private resetTimeout() {
@@ -169,31 +166,66 @@ class WhatsAppClientManager {
 
     createSession(sessionId: string): WhatsAppClient {
         if (this.sessions.has(sessionId)) {
-            return this.getSession(sessionId)!;
+            return this.sessions.get(sessionId)!;
         }
 
         console.log(`[Manager] Creando nueva sesión para ${sessionId}`);
         const client = new WhatsAppClient(sessionId);
 
-        client.on('timeout', () => this.deleteSession(sessionId, false)); // No eliminar archivos en timeout
-        client.on('disconnected', () => this.deleteSession(sessionId, true)); // Eliminar archivos en desconexión permanente
+        client.on('timeout', () => {
+            console.log(`[Manager] Sesión ${sessionId} inactiva, desconectando.`);
+            client.disconnect();
+        });
+
+        client.on('disconnected', () => {
+            console.log(`[Manager] Sesión ${sessionId} desconectada, eliminada del mapa.`);
+            this.sessions.delete(sessionId);
+        });
 
         this.sessions.set(sessionId, client);
         return client;
     }
 
-    getSession(sessionId: string): WhatsAppClient | undefined {
-        return this.sessions.get(sessionId);
+    async getSession(sessionId: string): Promise<WhatsAppClient | undefined> {
+        let session = this.sessions.get(sessionId);
+        if (session?.isReady()) {
+            return session;
+        }
+
+        const sessionPath = path.join(SESSIONS_DIR, sessionId);
+        const sessionExistsOnDisk = await fs.pathExists(sessionPath);
+
+        if (sessionExistsOnDisk) {
+            if (!session) {
+                session = this.createSession(sessionId);
+            }
+            
+            console.log(`[Manager] Intentando restaurar sesión ${sessionId} desde el disco...`);
+            try {
+                const connectionPromise = new Promise<void>((resolve, reject) => {
+                    session!.once('ready', resolve);
+                    session!.once('disconnected', () => reject(new Error('La sesión se desconectó durante la restauración.')));
+                    setTimeout(() => reject(new Error('Timeout al restaurar la sesión desde el disco.')), 60000);
+                });
+
+                await session.connect();
+                await connectionPromise;
+                return session;
+            } catch (error: any) {
+                console.error(`[${sessionId}] Error al restaurar sesión desde disco:`, error.message);
+                await this.deleteSession(sessionId); // Limpiar sesión fallida
+                return undefined;
+            }
+        }
+        return session; // Devuelve la sesión si está en memoria pero no lista, o undefined si no existe
     }
 
-    async deleteSession(sessionId: string, shouldDeleteFiles: boolean = false): Promise<void> {
+    async deleteSession(sessionId: string): Promise<void> {
         const session = this.sessions.get(sessionId);
         if (session) {
-            console.log(`[Manager] Eliminando sesión para ${sessionId} (eliminar archivos: ${shouldDeleteFiles})`);
+            console.log(`[Manager] Eliminando sesión para ${sessionId}`);
             await session.disconnect();
             this.sessions.delete(sessionId);
-            const sessionPath = path.join(SESSIONS_DIR, sessionId);
-            await fs.remove(sessionPath);
         }
     }
 }

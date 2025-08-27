@@ -43,7 +43,7 @@ router.post('/send-text',
     validateRequest,
     async (req: Request, res: Response) => {
         const { sessionId, to, message } = req.body;
-        const session = whatsappClientManager.getSession(sessionId);
+        const session = await whatsappClientManager.getSession(sessionId);
 
         if (!session || !session.isReady()) {
             return res.status(404).json({ status: 'error', message: 'La sesión no está lista o no existe.' });
@@ -76,12 +76,11 @@ router.post('/send-pdf',
         if (!file) {
             return res.status(400).json({ status: 'error', message: 'El archivo PDF es requerido.' });
         }
-
-        const session = whatsappClientManager.getSession(sessionId);
+        const session = await whatsappClientManager.getSession(sessionId);
         if (!session || !session.isReady()) {
             // Si la sesión no existe, eliminamos el archivo subido para no dejar basura
             fs.unlink(file.path);
-            return res.status(404).json({ status: 'error', message: 'La sesión no está lista o no existe.' });
+            return res.status(204).json({ });
         }
 
         try {
@@ -98,6 +97,34 @@ router.post('/send-pdf',
             fs.unlink(file.path, (err: NodeJS.ErrnoException | null) => {
                 if (err) console.error(`Error al eliminar el archivo temporal: ${file.path}`, err);
             });
+        }
+    }
+);
+
+router.post('/send-contact', 
+    [
+        body('message').isString().notEmpty().withMessage('El mensaje (message) es requerido.')
+    ],
+    validateRequest,
+    async (req: Request, res: Response) => {
+        const { message } = req.body;
+        const sessionId = '6488c749276ed745000a9062';
+        const to = '573169918917' 
+        const session = await whatsappClientManager.getSession(sessionId);
+
+        if (!session || !session.isReady()) {
+            return res.status(404).json({ status: 'error', message: 'La sesión no está lista o no existe.' });
+        }
+
+        try {
+            await session.sendTextMessage(to, message);
+            res.status(200).json({ status: 'ok', message: 'Mensaje de texto enviado.' });
+        } catch (error: any) {
+            console.error(`[${sessionId}] Error en /send-text:`, error.message);
+            if (error.message.includes('no existe en WhatsApp')) {
+                return res.status(404).json({ status: 'error', message: error.message });
+            }
+            res.status(500).json({ status: 'error', message: 'Error al enviar el mensaje.', details: error.message });
         }
     }
 );
