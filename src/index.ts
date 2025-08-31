@@ -17,6 +17,7 @@ const allowedOrigins = [
     'https://www.desystemsoft.com',
     'http://localhost:4200',
     'https://app2.desystemsoft.com',
+    'https://app2.desystemsoft.com:907',
     'https://dian.desystemsoft.com'
 ];
 
