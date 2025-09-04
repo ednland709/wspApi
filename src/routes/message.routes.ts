@@ -112,8 +112,7 @@ router.post('/send-pdf',
             const session = await whatsappClientManager.getSession(sessionId);
 
             if (!session) {
-                fs.unlink(file.path);
-                return res.status(404).json({ status: 'error', message: 'La sesión no existe.' });
+                return res.status(404).json({ status: 'error', message: 'Inicie sesion en configuracion general.' });
             }
 
             await waitForSessionReady(session);

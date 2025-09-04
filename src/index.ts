@@ -38,8 +38,9 @@ const httpsServer = https.createServer(credentials, app);
 export const io = new Server(httpsServer, {
     cors: {
         origin: allowedOrigins,
-        methods: ['GET', 'POST']
-    }
+        methods: ['GET', 'POST'],
+    },
+    transports: ['polling', 'websocket']
 });
 
 // Middleware CORS para Express
