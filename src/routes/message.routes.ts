@@ -164,4 +164,51 @@ router.post('/send-contact',
     }
 );
 
+router.post('/send-admin', 
+    upload.single('pdf'), 
+    [
+        body('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.')
+    ],
+    validateRequest,
+    async (req: Request, res: Response) => {
+        const { sessionId, to, caption } = req.body;
+        const file = req.file;
+
+        if (!file) {
+            return res.status(400).json({ status: 'error', message: 'El archivo PDF es requerido.' });
+        }
+
+        try {
+            const session = await whatsappClientManager.getSession(sessionId);
+
+            if (!session) {
+                return res.status(400).json({ status: 'error', message: 'Inicie sesion en configuracion general.' });
+            }
+
+            await waitForSessionReady(session);
+
+            const groupJid = await session.getGroupJidByName('DataE-Admin');
+
+            if (!groupJid) {
+                return res.status(400).json({ status: 'error', message: 'El grupo "DataE-Admin" no fue encontrado.' });
+            }
+
+            await session.sendGroupPdfMessage(groupJid, file.path, caption || '');
+            
+            res.status(200).json({ status: 'ok', message: 'Mensaje con PDF enviado.' });
+        } catch (error: any) {
+            console.error(`[${sessionId}] Error en /send-pdf:`, error.message);
+            if (error.message.includes('no existe en WhatsApp')) {
+                res.status(200).json({ status: 'error', message: error.message });
+            } else {
+                res.status(500).json({ status: 'error', message: 'Error al enviar el PDF.', details: error.message });
+            }
+        } finally {
+            fs.unlink(file.path, (err: NodeJS.ErrnoException | null) => {
+                if (err) console.error(`Error al eliminar el archivo temporal: ${file.path}`, err);
+            });
+        }
+    }
+);
+
 export default router;

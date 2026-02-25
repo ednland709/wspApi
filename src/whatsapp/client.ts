@@ -149,6 +149,36 @@ export class WhatsAppClient extends EventEmitter {
             caption: caption
         });
     }
+
+    public async sendGroupTextMessage(groupId: string, message: string): Promise<proto.WebMessageInfo | undefined> {
+        if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
+        // Simple check for group id format
+        if (!groupId.endsWith('@g.us')) throw new Error('Invalid group ID.');
+        return this.sock!.sendMessage(groupId, { text: message });
+    }
+
+    public async getAllGroups() {
+        if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
+        const groups = await this.sock.groupFetchAllParticipating();
+        return groups;
+    }
+
+    public async getGroupJidByName(name: string): Promise<string | undefined> {
+        const groups = await this.getAllGroups();
+        const group = Object.values(groups).find(group => group.subject === name);
+        return group?.id;
+    }
+
+    public async sendGroupPdfMessage(groupId: string, pdfPath: string, caption: string): Promise<proto.WebMessageInfo | undefined> {
+        if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
+        if (!groupId.endsWith('@g.us')) throw new Error('Invalid group ID.');
+        return this.sock!.sendMessage(groupId, {
+            document: { url: pdfPath },
+            mimetype: 'application/pdf',
+            fileName: path.basename(pdfPath),
+            caption: caption
+        });
+    }
 }
 
 class WhatsAppClientManager {
