@@ -68,9 +68,14 @@ export class WhatsAppClient extends EventEmitter {
                 this.connectionState = 'close';
                 this.sock = null; // Asegurarse de que el socket se nulifique al cerrar la conexión
                 const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-                
-                if (statusCode === DisconnectReason.loggedOut) {
-                    console.log(`[${this.sessionId}] Conexión cerrada permanentemente (logged out).`);
+                const errorMessage = (lastDisconnect?.error as Boom)?.message || '';
+                const invalidSession = statusCode === DisconnectReason.loggedOut ||
+                    errorMessage.includes('Bad MAC') ||
+                    errorMessage.toLowerCase().includes('session');
+
+                if (invalidSession) {
+                    console.log(`[${this.sessionId}] Sesión inválida o cerrada permanentemente (${errorMessage || statusCode}).`);
+                    this.emit('session-invalid');
                     this.emit('disconnected');
                 } else if (!this.isIntentionalDisconnect) {
                     console.log(`[${this.sessionId}] Conexión cerrada, intentando reconectar...`);
