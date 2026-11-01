@@ -3,7 +3,7 @@ import multer from 'multer';
 import * as fs from 'fs-extra';
 import * as path from 'path';
 import { whatsappClientManager, WhatsAppClient } from '../whatsapp/client';
-import { body } from 'express-validator';
+import { body, param } from 'express-validator';
 import { validateRequest } from '../middlewares/validator';
 
 const router = Router();
@@ -63,6 +63,36 @@ const waitForSessionReady = (session: WhatsAppClient, timeout = 30000): Promise<
 
 // --- Rutas de la API ---
 
+router.get(
+    '/:sessionId/:messageId/status',
+    [
+        param('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.'),
+        param('messageId').isString().notEmpty().withMessage('El messageId es requerido.')
+    ],
+    validateRequest,
+    async (req: Request, res: Response) => {
+        const { sessionId, messageId } = req.params;
+        if (!sessionId || !messageId) {
+            return res.status(400).json({ status: 'error', message: 'sessionId y messageId son requeridos.' });
+        }
+        const session = await whatsappClientManager.getSession(sessionId);
+
+        if (!session) {
+            return res.status(404).json({ status: 'error', message: 'La sesión no existe.' });
+        }
+
+        const message = session.getOutgoingMessage(messageId);
+        if (!message) {
+            return res.status(404).json({
+                status: 'error',
+                message: 'No se encontró el mensaje en el registro de esta sesión.'
+            });
+        }
+
+        return res.status(200).json({ status: 'ok', message });
+    }
+);
+
 router.post('/send-text', 
     [
         body('sessionId').isString().notEmpty().withMessage('El sessionId es requerido.'),
@@ -81,8 +111,14 @@ router.post('/send-text',
 
             await waitForSessionReady(session);
 
-            await session.sendTextMessage(to, message);
-            res.status(200).json({ status: 'ok', message: 'Mensaje de texto enviado.' });
+            const sentMessage = await session.sendTextMessage(to, message);
+            const delivery = sentMessage?.key.id && session.getOutgoingMessage(sentMessage.key.id);
+            res.status(200).json({
+                status: 'ok',
+                message: 'Mensaje aceptado por WhatsApp.',
+                messageId: sentMessage?.key.id,
+                delivery
+            });
         } catch (error: any) {
             console.error(`[${sessionId}] Error en /send-text:`, error.message);
             if (error.message.includes('no existe en WhatsApp')) {
@@ -117,8 +153,14 @@ router.post('/send-pdf',
 
             await waitForSessionReady(session);
 
-            await session.sendPdfMessage(to, file.path, caption || '');
-            res.status(200).json({ status: 'ok', message: 'Mensaje con PDF enviado.' });
+            const sentMessage = await session.sendPdfMessage(to, file.path, caption || '');
+            const delivery = sentMessage?.key.id && session.getOutgoingMessage(sentMessage.key.id);
+            res.status(200).json({
+                status: 'ok',
+                message: 'PDF aceptado por WhatsApp.',
+                messageId: sentMessage?.key.id,
+                delivery
+            });
         } catch (error: any) {
             console.error(`[${sessionId}] Error en /send-pdf:`, error.message);
             if (error.message.includes('no existe en WhatsApp')) {
@@ -152,8 +194,14 @@ router.post('/send-contact',
 
             await waitForSessionReady(session);
 
-            await session.sendTextMessage(to, message);
-            res.status(200).json({ status: 'ok', message: 'Mensaje de texto enviado.' });
+            const sentMessage = await session.sendTextMessage(to, message);
+            const delivery = sentMessage?.key.id && session.getOutgoingMessage(sentMessage.key.id);
+            res.status(200).json({
+                status: 'ok',
+                message: 'Mensaje aceptado por WhatsApp.',
+                messageId: sentMessage?.key.id,
+                delivery
+            });
         } catch (error: any) {
             console.error(`[${sessionId}] Error en /send-text:`, error.message);
             if (error.message.includes('no existe en WhatsApp')) {
@@ -193,9 +241,15 @@ router.post('/send-admin',
                 return res.status(400).json({ status: 'error', message: 'El grupo "DataE-Admin" no fue encontrado.' });
             }
 
-            await session.sendGroupPdfMessage(groupJid, file.path, caption || '');
-            
-            res.status(200).json({ status: 'ok', message: 'Mensaje con PDF enviado.' });
+            const sentMessage = await session.sendGroupPdfMessage(groupJid, file.path, caption || '');
+            const delivery = sentMessage?.key.id && session.getOutgoingMessage(sentMessage.key.id);
+
+            res.status(200).json({
+                status: 'ok',
+                message: 'PDF aceptado por WhatsApp.',
+                messageId: sentMessage?.key.id,
+                delivery
+            });
         } catch (error: any) {
             console.error(`[${sessionId}] Error en /send-pdf:`, error.message);
             if (error.message.includes('no existe en WhatsApp')) {

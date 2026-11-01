@@ -3,7 +3,9 @@ import makeWASocket, {
     useMultiFileAuthState,
     WASocket,
     proto,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    AnyMessageContent,
+    generateMessageIDV2
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import * as path from 'path';
@@ -15,6 +17,17 @@ import { io } from '../index'; // Importar la instancia de socket.io
 
 const SESSIONS_DIR = path.join(__dirname, '../../auth_info_baileys');
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
+const MESSAGE_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
+
+export type OutgoingMessageStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'played' | 'failed';
+
+export interface OutgoingMessage {
+    messageId: string;
+    chatId: string;
+    status: OutgoingMessageStatus;
+    sentAt: string;
+    updatedAt: string;
+}
 
 // Asegurarse de que el directorio de sesiones exista
 fs.ensureDirSync(SESSIONS_DIR);
@@ -27,6 +40,7 @@ export class WhatsAppClient extends EventEmitter {
     private reconnectAttempts = 0; // Añadir esta línea
     private readonly sessionPath: string;
     private isIntentionalDisconnect = false;
+    private outgoingMessages = new Map<string, OutgoingMessage>();
 
     constructor(public readonly sessionId: string) {
         super();
@@ -55,6 +69,22 @@ export class WhatsAppClient extends EventEmitter {
         });
 
         this.sock.ev.on('creds.update', saveCreds);
+        this.sock.ev.on('messages.update', (updates) => {
+            for (const { key, update } of updates) {
+                if (!key.fromMe || !key.id || update.status == null) continue;
+                this.updateOutgoingMessageStatus(key.id, update.status);
+            }
+        });
+        this.sock.ev.on('message-receipt.update', (updates) => {
+            for (const { key, receipt } of updates) {
+                if (!key.fromMe || !key.id) continue;
+                if (receipt.readTimestamp) {
+                    this.updateOutgoingMessageStatus(key.id, proto.WebMessageInfo.Status.READ);
+                } else if (receipt.receiptTimestamp) {
+                    this.updateOutgoingMessageStatus(key.id, proto.WebMessageInfo.Status.DELIVERY_ACK);
+                }
+            }
+        });
 
         this.sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -142,12 +172,12 @@ export class WhatsAppClient extends EventEmitter {
 
     public async sendTextMessage(to: string, message: string): Promise<proto.WebMessageInfo | undefined> {
         const jid = await this.prepareMessage(to);
-        return this.sock!.sendMessage(jid, { text: message });
+        return this.sendTrackedMessage(jid, { text: message });
     }
 
     public async sendPdfMessage(to: string, pdfPath: string, caption: string): Promise<proto.WebMessageInfo | undefined> {
         const jid = await this.prepareMessage(to);
-        return this.sock!.sendMessage(jid, {
+        return this.sendTrackedMessage(jid, {
             document: { url: pdfPath },
             mimetype: 'application/pdf',
             fileName: path.basename(pdfPath),
@@ -159,7 +189,7 @@ export class WhatsAppClient extends EventEmitter {
         if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
         // Simple check for group id format
         if (!groupId.endsWith('@g.us')) throw new Error('Invalid group ID.');
-        return this.sock!.sendMessage(groupId, { text: message });
+        return this.sendTrackedMessage(groupId, { text: message });
     }
 
     public async getAllGroups() {
@@ -177,12 +207,90 @@ export class WhatsAppClient extends EventEmitter {
     public async sendGroupPdfMessage(groupId: string, pdfPath: string, caption: string): Promise<proto.WebMessageInfo | undefined> {
         if (!this.isReady() || !this.sock) throw new Error('El cliente de WhatsApp no está listo.');
         if (!groupId.endsWith('@g.us')) throw new Error('Invalid group ID.');
-        return this.sock!.sendMessage(groupId, {
+        return this.sendTrackedMessage(groupId, {
             document: { url: pdfPath },
             mimetype: 'application/pdf',
             fileName: path.basename(pdfPath),
             caption: caption
         });
+    }
+
+    public getOutgoingMessage(messageId: string): OutgoingMessage | undefined {
+        this.pruneOutgoingMessages();
+        return this.outgoingMessages.get(messageId);
+    }
+
+    private async sendTrackedMessage(jid: string, content: AnyMessageContent): Promise<proto.WebMessageInfo | undefined> {
+        const sock = this.sock;
+        if (!this.isReady() || !sock) throw new Error('El cliente de WhatsApp no está listo.');
+        const messageId = generateMessageIDV2(sock.user?.id);
+        const now = new Date().toISOString();
+        const record: OutgoingMessage = {
+            messageId,
+            chatId: jid,
+            status: 'pending',
+            sentAt: now,
+            updatedAt: now
+        };
+        this.outgoingMessages.set(messageId, record);
+        this.pruneOutgoingMessages();
+        io.to(this.sessionId).emit('message-status', record);
+
+        try {
+            const sentMessage = await sock.sendMessage(jid, content, { messageId });
+            if (!sentMessage?.key.id || sentMessage.key.id !== messageId) {
+                throw new Error('WhatsApp no devolvió el ID esperado para el mensaje enviado.');
+            }
+            this.updateOutgoingMessageStatus(messageId, proto.WebMessageInfo.Status.SERVER_ACK);
+            return sentMessage;
+        } catch (error) {
+            this.updateOutgoingMessageStatus(messageId, proto.WebMessageInfo.Status.ERROR);
+            throw error;
+        }
+    }
+
+    private updateOutgoingMessageStatus(messageId: string, status: number): void {
+        const message = this.outgoingMessages.get(messageId);
+        if (!message) return;
+
+        const statusByBaileys: Partial<Record<number, OutgoingMessageStatus>> = {
+            [proto.WebMessageInfo.Status.ERROR]: 'failed',
+            [proto.WebMessageInfo.Status.SERVER_ACK]: 'sent',
+            [proto.WebMessageInfo.Status.DELIVERY_ACK]: 'delivered',
+            [proto.WebMessageInfo.Status.READ]: 'read',
+            [proto.WebMessageInfo.Status.PLAYED]: 'played'
+        };
+        const nextStatus = statusByBaileys[status];
+        if (!nextStatus) return;
+        if (nextStatus === 'failed') {
+            if (message.status !== 'pending') return;
+        } else if (message.status === 'failed' || this.statusRank(nextStatus) <= this.statusRank(message.status)) {
+            return;
+        }
+
+        const updatedMessage = { ...message, status: nextStatus, updatedAt: new Date().toISOString() };
+        this.outgoingMessages.set(messageId, updatedMessage);
+        io.to(this.sessionId).emit('message-status', updatedMessage);
+    }
+
+    private statusRank(status: OutgoingMessageStatus): number {
+        return {
+            pending: 0,
+            sent: 1,
+            delivered: 2,
+            read: 3,
+            played: 4,
+            failed: -1
+        }[status];
+    }
+
+    private pruneOutgoingMessages(): void {
+        const expiryTime = Date.now() - MESSAGE_STATUS_TTL_MS;
+        for (const [messageId, message] of this.outgoingMessages) {
+            if (Date.parse(message.sentAt) < expiryTime) {
+                this.outgoingMessages.delete(messageId);
+            }
+        }
     }
 }
 

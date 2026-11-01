@@ -22,7 +22,7 @@ Este proyecto proporciona una API RESTful para enviar mensajes de texto y docume
     ```
 
 2.  **Instala las dependencias:**
-    Asegúrate de tener Node.js (v16 o superior) instalado.
+    Asegúrate de tener Node.js (v20 o superior) instalado.
     ```bash
     npm install
     ```
@@ -92,7 +92,19 @@ Para un entorno de producción, es recomendable usar PM2 para mantener la aplica
 
 ## 4. API Endpoints
 
-### GET /api/status
+### Estado de entrega de mensajes
+
+Los endpoints de envío responden cuando Baileys acepta el mensaje, no cuando el destinatario ya lo recibió o descifró. La respuesta incluye `messageId` y un estado inicial `sent`. Consulta el estado con:
+
+```http
+GET /api/messages/{sessionId}/{messageId}/status
+```
+
+Los cambios también se emiten por Socket.IO en el evento `message-status` dentro de la sala de la sesión. Los estados posibles son `pending`, `sent`, `delivered`, `read`, `played` y `failed`. Para grupos, `delivered`/`read` indica que se recibió un acuse de al menos un participante.
+
+El registro de estados vive en memoria y se conserva hasta 24 horas mientras la sesión permanezca registrada en el proceso. Se pierde al reiniciar, al eliminar/desconectar permanentemente la sesión o al vencer ese plazo; tampoco se comparte entre instancias. Para despliegues con varias instancias se necesita persistirlo en una base de datos compartida y mantener una sola instancia propietaria de cada sesión.
+
+### GET /api/sessions/{sessionId}
 
 Verifica si el cliente de WhatsApp está conectado y listo para enviar mensajes.
 
@@ -100,6 +112,7 @@ Verifica si el cliente de WhatsApp está conectado y listo para enviar mensajes.
 ```json
 {
     "status": "ok",
+    "sessionId": "empresa-123",
     "isReady": true,
     "message": "Cliente de WhatsApp listo."
 }
@@ -115,15 +128,40 @@ Envía un mensaje de texto plano.
 **Body (JSON):**
 ```json
 {
+    "sessionId": "empresa-123",
     "to": "521XXXXXXXXXX",
     "message": "Hola, esto es una prueba desde la API."
 }
 ```
+La ruta real está bajo el prefijo `/api/messages`:
+
+```text
+POST /api/messages/send-text
+```
+La respuesta incluye el ID de WhatsApp y el estado actual del envío. Usa el endpoint de estado anterior para seguir las confirmaciones; un estado `sent` no confirma la entrega al destinatario.
+
+*   `sessionId`: Identificador de la sesión de WhatsApp ya conectada.
 *   `to`: Número de teléfono en formato internacional, incluyendo el código de país y el `1` después del código si es un móvil de México. No incluyas `+` o `00`.
+
+**Respuesta de ejemplo:**
+```json
+{
+    "status": "ok",
+    "message": "Mensaje aceptado por WhatsApp.",
+    "messageId": "3EB0...",
+    "delivery": {
+        "messageId": "3EB0...",
+        "chatId": "521...@s.whatsapp.net",
+        "status": "sent",
+        "sentAt": "2026-10-23T17:00:00.000Z",
+        "updatedAt": "2026-10-23T17:00:00.100Z"
+    }
+}
+```
 
 **Ejemplo con `curl`:**
 ```bash
-curl -X POST -H "Content-Type: application/json" -d '{"to": "521...", "message": "Hola mundo"}' http://localhost:3000/api/send-text
+curl -X POST -H "Content-Type: application/json" -d '{"sessionId":"empresa-123","to":"521...","message":"Hola mundo"}' https://localhost:7080/api/messages/send-text
 ```
 
 ### POST /api/send-pdf
@@ -134,11 +172,19 @@ Envía un archivo PDF con un pie de foto opcional.
 *   `Content-Type: multipart/form-data`
 
 **Body (form-data):**
+*   `sessionId` (texto): El identificador de la sesión conectada.
 *   `to` (texto): El número de teléfono del destinatario.
 *   `pdf` (archivo): El archivo PDF que deseas enviar.
 *   `caption` (texto, opcional): Un texto que se enviará junto al PDF.
 
 **Ejemplo con `curl`:**
 ```bash
-curl -X POST -F "to=521..." -F "caption=Factura de este mes" -F "pdf=@/ruta/a/tu/archivo.pdf" http://localhost:3000/api/send-pdf
+curl -X POST -F "sessionId=empresa-123" -F "to=521..." -F "caption=Factura de este mes" -F "pdf=@/ruta/a/tu/archivo.pdf" https://localhost:7080/api/messages/send-pdf
 ```
+
+### Operación de sesiones y actualización
+
+- Mantén una sola instancia de la aplicación escribiendo cada carpeta de `auth_info_baileys/{sessionId}`. La configuración PM2 incluida usa una instancia; no habilites modo clúster ni réplicas que compartan esas carpetas.
+- Conserva y respalda de forma segura `auth_info_baileys`. No borres credenciales para resolver un mensaje pendiente salvo que se haya confirmado que la sesión está dañada y se pueda volver a vincular la cuenta.
+- La aplicación usa Baileys 6.7.24. Prueba futuras actualizaciones primero en staging; Baileys 7 incluye cambios incompatibles y no se actualiza automáticamente a esa versión.
+- El aviso “Esperando el mensaje” está relacionado con el descifrado/sincronización entre dispositivos del destinatario. Los estados de entrega ayudan a detectar el problema, pero no permiten reparar las claves del teléfono del destinatario.
