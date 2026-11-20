@@ -1,11 +1,13 @@
 import makeWASocket, {
     DisconnectReason,
     useMultiFileAuthState,
+    makeCacheableSignalKeyStore,
     WASocket,
     proto,
     fetchLatestBaileysVersion,
     AnyMessageContent,
-    generateMessageIDV2
+    generateMessageIDV2,
+    CacheStore
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import * as path from 'path';
@@ -16,8 +18,57 @@ import { EventEmitter } from 'events';
 import { io } from '../index'; // Importar la instancia de socket.io
 
 const SESSIONS_DIR = path.join(__dirname, '../../auth_info_baileys');
-const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
+const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_MS) || 60 * 60 * 1000; // 60 minutos por defecto para atender retry receipts tardíos
 const MESSAGE_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
+const SENT_MESSAGE_CACHE_MAX_SIZE = 2000;
+const POST_CONNECT_WARMUP_MS = 1500;
+
+class SimpleTtlCache implements CacheStore {
+    private store = new Map<string, { value: unknown; expiresAt: number }>();
+
+    constructor(
+        private readonly ttlMs: number,
+        private readonly maxEntries = 1000
+    ) {}
+
+    get<T>(key: string): T | undefined {
+        const entry = this.store.get(key);
+        if (!entry) return undefined;
+        if (Date.now() > entry.expiresAt) {
+            this.store.delete(key);
+            return undefined;
+        }
+        return entry.value as T;
+    }
+
+    set<T>(key: string, value: T): void {
+        if (this.store.size >= this.maxEntries && !this.store.has(key)) {
+            this.prune();
+            if (this.store.size >= this.maxEntries) {
+                const oldestKey = this.store.keys().next().value;
+                if (oldestKey !== undefined) this.store.delete(oldestKey);
+            }
+        }
+        this.store.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+    }
+
+    del(key: string): void {
+        this.store.delete(key);
+    }
+
+    flushAll(): void {
+        this.store.clear();
+    }
+
+    private prune(): void {
+        const now = Date.now();
+        for (const [key, entry] of this.store) {
+            if (now > entry.expiresAt) {
+                this.store.delete(key);
+            }
+        }
+    }
+}
 
 export type OutgoingMessageStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'played' | 'failed';
 
@@ -40,7 +91,10 @@ export class WhatsAppClient extends EventEmitter {
     private reconnectAttempts = 0; // Añadir esta línea
     private readonly sessionPath: string;
     private isIntentionalDisconnect = false;
+    private connectedAt: number | null = null;
     private outgoingMessages = new Map<string, OutgoingMessage>();
+    private sentMessageContents = new Map<string, { message: proto.IMessage; storedAt: number }>();
+    private readonly msgRetryCounterCache = new SimpleTtlCache(60 * 60 * 1000, 1000);
 
     constructor(public readonly sessionId: string) {
         super();
@@ -58,17 +112,36 @@ export class WhatsAppClient extends EventEmitter {
         this.connectionState = 'connecting';
         await fs.ensureDir(this.sessionPath);
         const { state, saveCreds } = await useMultiFileAuthState(this.sessionPath);
+        const logger = pino({ level: 'info' });
         
         const { version, isLatest } = await fetchLatestBaileysVersion();
         console.log(`[${this.sessionId}] Usando la versión de WA v${version.join('.')}, ¿es la última?: ${isLatest}`);
 
         this.sock = makeWASocket({
             version,
-            auth: state,
-            logger: pino({ level: 'info' }) // Cambiado a 'info' para depuración
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger)
+            },
+            logger,
+            msgRetryCounterCache: this.msgRetryCounterCache,
+            markOnlineOnConnect: false,
+            syncFullHistory: false,
+            shouldSyncHistoryMessage: () => false,
+            getMessage: async (key) => {
+                if (!key.id) return undefined;
+                return this.getCachedMessageContent(key.id);
+            }
         });
 
         this.sock.ev.on('creds.update', saveCreds);
+        this.sock.ev.on('messages.upsert', ({ messages }) => {
+            for (const msg of messages) {
+                if (msg.key.fromMe && msg.key.id && msg.message) {
+                    this.cacheMessageContent(msg.key.id, msg.message);
+                }
+            }
+        });
         this.sock.ev.on('messages.update', (updates) => {
             for (const { key, update } of updates) {
                 if (!key.fromMe || !key.id || update.status == null) continue;
@@ -96,6 +169,7 @@ export class WhatsAppClient extends EventEmitter {
 
             if (connection === 'close') {
                 this.connectionState = 'close';
+                this.connectedAt = null;
                 this.sock = null; // Asegurarse de que el socket se nulifique al cerrar la conexión
                 const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
                 const errorMessage = (lastDisconnect?.error as Boom)?.message || '';
@@ -116,12 +190,13 @@ export class WhatsAppClient extends EventEmitter {
                         setTimeout(() => this.connect(), delay);
                     } else {
                         console.error(`[${this.sessionId}] Máximo de intentos de reconexión alcanzado. Sesión cerrada.`);
-                        this.emit('disconnected'); // Emitir desconexión permanente
+                        this.emit('disconnected'); // Emitir desconexión temporal sin borrar credenciales
                     }
                 }
             } else if (connection === 'open') {
                 this.reconnectAttempts = 0; // Resetear intentos al conectar exitosamente
                 this.connectionState = 'open';
+                this.connectedAt = Date.now();
                 this.qr = null;
                 console.log(`[${this.sessionId}] Conexión abierta y cliente listo!`);
                 this.emit('ready');
@@ -167,7 +242,7 @@ export class WhatsAppClient extends EventEmitter {
         const jid = this.formatJid(to);
         const [result] = (await this.sock.onWhatsApp(jid)) || [];
         if (!result?.exists) throw new Error(`El número ${to} no existe en WhatsApp.`);
-        return jid;
+        return result.jid || jid;
     }
 
     public async sendTextMessage(to: string, message: string): Promise<proto.WebMessageInfo | undefined> {
@@ -221,6 +296,13 @@ export class WhatsAppClient extends EventEmitter {
     }
 
     private async sendTrackedMessage(jid: string, content: AnyMessageContent): Promise<proto.WebMessageInfo | undefined> {
+        if (this.connectedAt !== null) {
+            const elapsed = Date.now() - this.connectedAt;
+            if (elapsed < POST_CONNECT_WARMUP_MS) {
+                await new Promise(resolve => setTimeout(resolve, POST_CONNECT_WARMUP_MS - elapsed));
+            }
+        }
+
         const sock = this.sock;
         if (!this.isReady() || !sock) throw new Error('El cliente de WhatsApp no está listo.');
         const messageId = generateMessageIDV2(sock.user?.id);
@@ -241,11 +323,44 @@ export class WhatsAppClient extends EventEmitter {
             if (!sentMessage?.key.id || sentMessage.key.id !== messageId) {
                 throw new Error('WhatsApp no devolvió el ID esperado para el mensaje enviado.');
             }
+            if (sentMessage.message) {
+                this.cacheMessageContent(messageId, sentMessage.message);
+            }
             this.updateOutgoingMessageStatus(messageId, proto.WebMessageInfo.Status.SERVER_ACK);
             return sentMessage;
         } catch (error) {
             this.updateOutgoingMessageStatus(messageId, proto.WebMessageInfo.Status.ERROR);
             throw error;
+        }
+    }
+
+    private cacheMessageContent(messageId: string, message: proto.IMessage): void {
+        if (this.sentMessageContents.size >= SENT_MESSAGE_CACHE_MAX_SIZE && !this.sentMessageContents.has(messageId)) {
+            this.pruneSentMessageContents();
+            if (this.sentMessageContents.size >= SENT_MESSAGE_CACHE_MAX_SIZE) {
+                const oldestKey = this.sentMessageContents.keys().next().value;
+                if (oldestKey !== undefined) this.sentMessageContents.delete(oldestKey);
+            }
+        }
+        this.sentMessageContents.set(messageId, { message, storedAt: Date.now() });
+    }
+
+    private getCachedMessageContent(messageId: string): proto.IMessage | undefined {
+        const entry = this.sentMessageContents.get(messageId);
+        if (!entry) return undefined;
+        if (Date.now() - entry.storedAt > MESSAGE_STATUS_TTL_MS) {
+            this.sentMessageContents.delete(messageId);
+            return undefined;
+        }
+        return entry.message;
+    }
+
+    private pruneSentMessageContents(): void {
+        const expiryTime = Date.now() - MESSAGE_STATUS_TTL_MS;
+        for (const [messageId, entry] of this.sentMessageContents) {
+            if (entry.storedAt < expiryTime) {
+                this.sentMessageContents.delete(messageId);
+            }
         }
     }
 
@@ -310,9 +425,14 @@ class WhatsAppClientManager {
             client.disconnect();
         });
 
-        client.on('disconnected', () => {
-            console.log(`[Manager] Sesión ${sessionId} desconectada, eliminando...`);
+        client.on('session-invalid', () => {
+            console.log(`[Manager] Sesión ${sessionId} inválida, eliminando credenciales...`);
             this.deleteSession(sessionId);
+        });
+
+        client.on('disconnected', () => {
+            console.log(`[Manager] Sesión ${sessionId} desconectada, liberando de memoria...`);
+            this.sessions.delete(sessionId);
         });
 
         this.sessions.set(sessionId, client);
